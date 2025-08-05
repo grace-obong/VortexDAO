@@ -94,3 +94,112 @@
 (define-private (is-contract-owner)
   (is-eq tx-sender contract-owner)
 )
+
+(define-private (check-initialized)
+  (ok (asserts! (var-get initialized) err-not-initialized))
+)
+
+(define-private (validate-proposal-id (proposal-id uint))
+  (ok (asserts! (<= proposal-id (var-get proposal-count)) err-invalid-proposal-id))
+)
+
+(define-private (calculate-voting-power (voter principal))
+  (default-to u0 (map-get? balances voter))
+)
+
+(define-private (transfer-tokens
+    (sender principal)
+    (recipient principal)
+    (amount uint)
+  )
+  (let (
+      (sender-balance (default-to u0 (map-get? balances sender)))
+      (recipient-balance (default-to u0 (map-get? balances recipient)))
+    )
+    (asserts! (>= sender-balance amount) err-insufficient-balance)
+    (map-set balances sender (- sender-balance amount))
+    (map-set balances recipient (+ recipient-balance amount))
+    (ok true)
+  )
+)
+
+(define-private (mint-tokens
+    (account principal)
+    (amount uint)
+  )
+  (let ((current-balance (default-to u0 (map-get? balances account))))
+    (map-set balances account (+ current-balance amount))
+    (var-set total-supply (+ (var-get total-supply) amount))
+    (ok true)
+  )
+)
+
+(define-private (burn-tokens
+    (account principal)
+    (amount uint)
+  )
+  (let ((current-balance (default-to u0 (map-get? balances account))))
+    (asserts! (>= current-balance amount) err-insufficient-balance)
+    (map-set balances account (- current-balance amount))
+    (var-set total-supply (- (var-get total-supply) amount))
+    (ok true)
+  )
+)
+
+;; PUBLIC FUNCTIONS
+
+;; Initialize the DAO protocol
+(define-public (initialize)
+  (begin
+    (asserts! (is-contract-owner) err-owner-only)
+    (asserts! (not (var-get initialized)) err-already-initialized)
+    (var-set initialized true)
+    (ok true)
+  )
+)
+
+;; Stake STX to join the DAO and gain voting power
+(define-public (deposit (amount uint))
+  (begin
+    (try! (check-initialized))
+    (asserts! (>= amount (var-get minimum-deposit)) err-below-minimum)
+    (asserts! (> amount u0) err-zero-amount)
+
+    ;; Secure STX transfer to treasury
+    (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+
+    ;; Record member staking details
+    (map-set deposits tx-sender {
+      amount: amount,
+      lock-until: (+ stacks-block-height (var-get lock-period)),
+      last-reward-block: stacks-block-height,
+    })
+
+    ;; Issue governance tokens
+    (mint-tokens tx-sender amount)
+  )
+)
+
+;; Withdraw staked STX after lock period expires
+(define-public (withdraw (amount uint))
+  (begin
+    (try! (check-initialized))
+    (asserts! (> amount u0) err-zero-amount)
+
+    (let (
+        (deposit-info (unwrap! (map-get? deposits tx-sender) err-unauthorized))
+        (user-balance (unwrap! (get-balance tx-sender) err-unauthorized))
+      )
+      (asserts! (>= stacks-block-height (get lock-until deposit-info))
+        err-locked-period
+      )
+      (asserts! (>= user-balance amount) err-insufficient-balance)
+
+      ;; Burn governance tokens
+      (try! (burn-tokens tx-sender amount))
+
+      ;; Return STX to member
+      (as-contract (stx-transfer? amount (as-contract tx-sender) tx-sender))
+    )
+  )
+)
